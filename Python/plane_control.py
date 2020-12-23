@@ -16,8 +16,22 @@ class LongitudinalAutoPilot(object):
         self.alt_int = 0.0
         self.climb_speed_int = 0.0
         
-        
-        
+        # Pitch attitude hold
+        self.k_p_theta = 0.0
+        self.k_d_theta = 0.0
+        # Altitude hold
+        self.k_p_z = 0.0
+        self.k_i_z = 0.0
+        self.i_z_t = 0.0
+        # Airspeed hold using commanded pitch
+        self.i_v_t2 = 0.0
+        self.k_p_v2 = 0.0
+        self.k_i_v2 = 0.0
+        # Airspeed hold using commanded throttle
+        self.i_v_t = 0.0
+        self.k_p_v = 0.0
+        self.k_i_v = 0.0
+        self.deta_star_t = 0.0  # feed-forward value for the thrust based on trim calculations
         return
     
     
@@ -36,8 +50,7 @@ class LongitudinalAutoPilot(object):
     def pitch_loop(self, pitch, pitch_rate, pitch_cmd):
         elevator_cmd = 0.0
         # STUDENT CODE HERE
-        
-        
+        elevator_cmd = self.k_p_theta * (pitch_cmd - pitch) + self.k_d_theta * pitch_rate
         return elevator_cmd
     
     """Used to calculate the pitch command required to maintain the commanded
@@ -54,9 +67,11 @@ class LongitudinalAutoPilot(object):
     def altitude_loop(self, altitude, altitude_cmd, dt):
         pitch_cmd = 0.0
         # STUDENT CODE HERE
-        
-        
-        
+        Ezt = altitude_cmd - altitude
+        pitch_cmd = self.k_p_z * Ezt
+        if self.max_pitch_cmd < pitch_cmd < self.max_pitch_cmd2:
+            self.i_z_t += Ezt * dt
+            pitch_cmd += self.k_i_z * self.i_z_t
         return pitch_cmd
     
 
@@ -74,8 +89,11 @@ class LongitudinalAutoPilot(object):
     def airspeed_loop(self, airspeed, airspeed_cmd, dt):        
         throttle_cmd = 0.0
         # STUDENT CODE HERE
-        
-        
+        Evt = airspeed_cmd - airspeed
+        throttle_cmd = self.deta_star_t + self.k_p_v * Evt
+        if self.min_throttle < throttle_cmd < self.max_throttle:
+            self.i_v_t += Evt * dt
+            throttle_cmd += self.k_i_v * self.i_v_t
         return throttle_cmd
     """Used to calculate the pitch command required to maintain the commanded
     airspeed
@@ -91,7 +109,11 @@ class LongitudinalAutoPilot(object):
     def airspeed_pitch_loop(self, airspeed, airspeed_cmd, dt):
         pitch_cmd = 0.0
         # STUDENT CODE HERE
-        
+        Evt = airspeed_cmd - airspeed
+        pitch_cmd = self.k_p_v2 * Evt
+        if self.max_pitch_cmd < pitch_cmd < self.max_pitch_cmd2:
+            self.i_v_t2 += Evt * dt
+            pitch_cmd += self.k_i_v2 * self.i_v_t2
         
         return pitch_cmd
     
@@ -114,8 +136,9 @@ class LongitudinalAutoPilot(object):
         pitch_cmd = 0.0
         throttle_cmd = 0.0
         # STUDENT CODE HERE
-        
-        
+        pitch_cmd = self.altitude_loop(altitude, altitude_cmd, dt)
+        pitch_cmd += self.airspeed_pitch_loop(airspeed, airspeed_cmd, dt)
+        throttle_cmd = self.airspeed_loop(airspeed, airspeed_cmd, dt)
         return[pitch_cmd, throttle_cmd]
 
 
@@ -130,7 +153,17 @@ class LateralAutoPilot:
         self.max_roll = 60*np.pi/180.0
         self.state = 1
 
+        # roll attitude hold
+        self.k_p_phi = 0
+        self.k_d_phi = 0
 
+        # sideslip hold
+        self.k_p_beta = 0
+        self.k_i_beta = 0
+
+        # course hold
+        self.k_p_yaw = 0.0
+        self.k_i_yaw = 0.0
 
     """Used to calculate the commanded aileron based on the roll error
     
@@ -150,9 +183,9 @@ class LateralAutoPilot:
                                 T_s = 0.0):
         aileron = 0
         # STUDENT CODE HERE
-        
-        
-        
+        Ephit = phi_cmd - phi
+        aileron = self.k_p_phi * Ephit - self.k_d_phi * roll_rate
+
         return aileron
 
     """Used to calculate the commanded roll angle from the course/yaw angle
@@ -171,12 +204,16 @@ class LateralAutoPilot:
                          yaw,     # actual heading 
                          T_s,
                          roll_ff=0):
-        roll_cmd = 0
+        yaw_cmd = 0
         
         # STUDENT CODE HERE
+        Eyawt = yaw_cmd - yaw
+        yaw_cmd = self.k_p_yaw * Eyawt + roll_ff
+        if 0 < yaw_cmd < self.max_roll:
+            self.integrator_yaw += Eyawt * T_s
+            yaw_cmd += self.k_i_yaw * self.integrator_yaw
         
-        
-        return roll_cmd
+        return yaw_cmd
 
 
     """Used to calculate the commanded rudder based on the sideslip
@@ -193,7 +230,10 @@ class LateralAutoPilot:
                            T_s):
         rudder = 0
         # STUDENT CODE HERE
-        
+        rudder = -self.k_d_phi * beta
+        if 0 < rudder < self.max_roll:
+            self.integrator_beta += beta * T_s
+            rudder -= self.k_i_beta * self.integrator_beta
         
         return rudder
     
