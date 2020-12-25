@@ -9,6 +9,7 @@ class LongitudinalAutoPilot(object):
         
         self.min_throttle = 0.0
         self.max_throttle = 1.0
+        self.min_pitch_cmd = -10*np.pi/180.0
         self.max_pitch_cmd = 30.0*np.pi/180.0
         self.max_pitch_cmd2 = 45.0*np.pi/180.0
         
@@ -31,7 +32,9 @@ class LongitudinalAutoPilot(object):
         self.i_v_t = 0.0
         self.k_p_v = 0.0
         self.k_i_v = 0.0
-        self.deta_star_t = 0.0  # feed-forward value for the thrust based on trim calculations
+        self.deta_star_t = 0.67  # feed-forward value for the thrust based on trim calculations
+        
+        self.altitude_switch = 25
         return
     
     
@@ -68,12 +71,20 @@ class LongitudinalAutoPilot(object):
         pitch_cmd = 0.0
         # STUDENT CODE HERE
         Ezt = altitude_cmd - altitude
-        pitch_cmd = self.k_p_z * Ezt
-        if self.max_pitch_cmd < pitch_cmd < self.max_pitch_cmd2:
-            self.i_z_t += Ezt * dt
-            pitch_cmd += self.k_i_z * self.i_z_t
-        return pitch_cmd
-    
+        self.i_z_t = self.i_z_t + Ezt * dt
+        pitch_cmd_unsat = self.k_p_z * Ezt + self.k_i_z * self.i_z_t
+
+        if (pitch_cmd_unsat > self.max_pitch_cmd):
+            pitch_cmd = self.max_pitch_cmd
+        elif (pitch_cmd_unsat < self.min_pitch_cmd):
+            pitch_cmd = self.min_pitch_cmd
+        else:
+            pitch_cmd = pitch_cmd_unsat
+
+        # Integrator anti-windup
+        if (self.k_i_z != 0):
+            self.i_z_t = self.i_z_t + dt/self.k_i_z * (pitch_cmd - pitch_cmd_unsat)
+        return pitch_cmd    
 
     """Used to calculate the throttle command required command the target 
     airspeed
@@ -90,11 +101,21 @@ class LongitudinalAutoPilot(object):
         throttle_cmd = 0.0
         # STUDENT CODE HERE
         Evt = airspeed_cmd - airspeed
-        throttle_cmd = self.deta_star_t + self.k_p_v * Evt
-        if self.min_throttle < throttle_cmd < self.max_throttle:
-            self.i_v_t += Evt * dt
-            throttle_cmd += self.k_i_v * self.i_v_t
+        self.i_v_t = self.i_v_t + Evt * dt
+        throttle_cmd_unstat = self.deta_star_t + self.k_p_v * Evt + self.k_i_v * self.i_v_t
+
+        # Anti windup
+        if (throttle_cmd_unstat > self.max_throttle):
+            throttle_cmd = self.max_throttle
+        elif (throttle_cmd_unstat < self.min_throttle):
+            throttle_cmd = self.min_throttle
+        else:
+            throttle_cmd = throttle_cmd_unstat
+
+        if (self.k_i_v != 0):
+            self.i_v_t = self.i_v_t + dt/self.k_i_v * (throttle_cmd - throttle_cmd_unstat)
         return throttle_cmd
+
     """Used to calculate the pitch command required to maintain the commanded
     airspeed
     
@@ -105,18 +126,25 @@ class LongitudinalAutoPilot(object):
         
         Returns:
             pitch_cmd: in radians
-    """
+    """ 
     def airspeed_pitch_loop(self, airspeed, airspeed_cmd, dt):
         pitch_cmd = 0.0
-        # STUDENT CODE HERE
         Evt = airspeed_cmd - airspeed
-        pitch_cmd = self.k_p_v2 * Evt
-        if self.max_pitch_cmd < pitch_cmd < self.max_pitch_cmd2:
-            self.i_v_t2 += Evt * dt
-            pitch_cmd += self.k_i_v2 * self.i_v_t2
-        
+        self.i_v_t2 = self.i_v_t2 + Evt * dt
+
+        pitch_cmd_unsat = self.k_p_v2 * Evt + self.k_i_v2 * self.i_v_t2
+
+        if (np.abs(pitch_cmd_unsat) > self.max_pitch_cmd2):
+            pitch_cmd = np.sign(pitch_cmd_unsat) * self.max_pitch_cmd2
+        else:
+            pitch_cmd = pitch_cmd_unsat
+
+        # Anti wind-up
+        if (self.k_i_v2 != 0):
+            self.i_v_t2 = self.i_v_t2 + dt / self.k_i_v2 * (pitch_cmd - pitch_cmd_unsat)
+
         return pitch_cmd
-    
+
     """Used to calculate the pitch command and throttle command based on the
     aicraft altitude error
     
@@ -136,9 +164,15 @@ class LongitudinalAutoPilot(object):
         pitch_cmd = 0.0
         throttle_cmd = 0.0
         # STUDENT CODE HERE
-        pitch_cmd = self.altitude_loop(altitude, altitude_cmd, dt)
-        pitch_cmd += self.airspeed_pitch_loop(airspeed, airspeed_cmd, dt)
-        throttle_cmd = self.airspeed_loop(airspeed, airspeed_cmd, dt)
+        if ((altitude_cmd - altitude) > altitude_switch):
+            throttle_cmd = 1.0
+            pitch_cmd = self.airspeed_pitch_loop(airspeed, airspeed_cmd, dt)
+        elif ((altitude - altitude_cmd) > altitude_switch):
+            throttle_cmd = 0.1
+            pitch_cmd = self.airspeed_pitch_loop(airspeed, airspeed_cmd, dt)
+        else:
+            throttle_cmd = self.airspeed_loop(airspeed, airspeed_cmd, dt)
+            pitch_cmd = self.altitude_loop(altitude, altitude_cmd, dt)
         return[pitch_cmd, throttle_cmd]
 
 
@@ -164,6 +198,9 @@ class LateralAutoPilot:
         # course hold
         self.k_p_yaw = 0.0
         self.k_i_yaw = 0.0
+
+        self.gain_p_xtrack = 0.003
+        self.gain_p_orbit = 0.0
 
     """Used to calculate the commanded aileron based on the roll error
     
@@ -199,22 +236,30 @@ class LateralAutoPilot:
         Returns:
             roll_cmd: commanded roll in radians
     """
-    def yaw_hold_loop(self,
-                         yaw_cmd,  # desired heading
-                         yaw,     # actual heading 
-                         T_s,
-                         roll_ff=0):
-        yaw_cmd = 0
-        
-        # STUDENT CODE HERE
+    def yaw_hold_loop(self, yaw_cmd, yaw, T_s, roll_ff=0):
+        roll_cmd = 0
         Eyawt = yaw_cmd - yaw
-        yaw_cmd = self.k_p_yaw * Eyawt + roll_ff
-        if 0 < yaw_cmd < self.max_roll:
-            self.integrator_yaw += Eyawt * T_s
-            yaw_cmd += self.k_i_yaw * self.integrator_yaw
-        
-        return yaw_cmd
+        while (Eyawt < np.pi):
+            Eyawt = Eyawt + 2*np.pi
 
+        while (Eyawt >= np.pi):
+            Eyawt = Eyawt - 2*np.pi
+
+        self.integrator_yaw = self.integrator_yaw + Eyawt * T_s
+
+        roll_cmd_unsat = self.k_p_yaw * Eyawt + roll_ff
+        if (np.abs(roll_cmd_unsat) > self.max_roll):
+            roll_cmd_unsat = np.sign(roll_cmd_unsat) * self.max_roll
+        roll_cmd_unsat = roll_cmd_unsat + self.k_i_yaw * self.integrator_yaw
+        if (np.abs(roll_cmd_unsat) > self.max_roll):
+            roll_cmd = np.sign(roll_cmd_unsat) * self.max_roll
+        else:
+            roll_cmd = roll_cmd_unsat
+
+        if (self.k_i_yaw != 0):
+            self.integrator_yaw = self.integrator_yaw + (T_s/self.k_i_yaw)*(roll_cmd - roll_cmd_unsat)
+
+        return roll_cmd
 
     """Used to calculate the commanded rudder based on the sideslip
     
@@ -230,11 +275,21 @@ class LateralAutoPilot:
                            T_s):
         rudder = 0
         # STUDENT CODE HERE
-        rudder = -self.k_d_phi * beta
-        if 0 < rudder < self.max_roll:
-            self.integrator_beta += beta * T_s
-            rudder -= self.k_i_beta * self.integrator_beta
-        
+        rudder_unsat = self.k_d_phi * (0.0 - beta)
+        self.integrator_beta = self.integrator_beta + (0.0 - beta)*T_s
+        if (np.abs(rudder_unsat) > 1):
+            rudder_unsat = 1 * np.sign(rudder_unsat)
+
+        rudder_unsat = rudder_unsat + self.k_i_beta * self.integrator_beta
+
+        if (np.abs(rudder_unsat) > 1):
+            rudder = 1 * np.sign(rudder_unsat)
+        else:
+            rudder = rudder_unsat
+
+        if (self.k_i_beta != 0):
+            self.integrator_beta = self.integrator_beta + (T_s/self.k_i_beta) * (rudder - rudder_unsat)
+
         return rudder
     
     """Used to calculate the desired course angle based on cross-track error
@@ -252,7 +307,9 @@ class LateralAutoPilot:
                                local_position):
         course_cmd = 0
         # STUDENT CODE HERE
-        
+        xtrack_error = np.cos(line_course) * (local_position[1] - line_origin[1])+\
+                        -np.sin(line_course) * (local_position[0] - line_origin[0])
+        course_cmd = -np.pi/2 * np.arctan(self.gain_p_xtrack * xtrack_error) + line_course
         
         return course_cmd
     
@@ -273,8 +330,20 @@ class LateralAutoPilot:
                        clockwise = True):
         course_cmd = 0
         # STUDENT CODE HERE
-        
-        
+        radius = np.linalg.norm(orbit_center[0:2] - local_position[0:2])
+        course_cmd = np.pi / 2 + np.arctan(self.gain_p_orbit * (radius - orbit_radius) / orbit_radius)
+        if (clockwise == False):
+            course_cmd = -course_cmd
+
+        addon = np.arctan2(local_position[1] - orbit_center[1], local_position[0] - orbit_center[0])
+        if ((addon - yaw) < -np.pi ):
+            while ((addon - yaw) < -np.pi ):
+                addon = addon + np.pi * 2
+
+        if ((addon - yaw) > np.pi ):
+            while ((addon - yaw) > np.pi ):
+                addon = addon - np.pi * 2
+        course_cmd = course_cmd + addon
         return course_cmd
 
     """Used to calculate the feedforward roll angle for a constant radius
@@ -292,7 +361,10 @@ class LateralAutoPilot:
         
         roll_ff = 0
         # STUDENT CODE HERE
-        
+        if (cw):
+            roll_ff = np.arctan(speed**2/(self.g*radius))
+        else:
+            roll_ff = -np.arctan(speed**2/(self.g*radius))
         
         return roll_ff
 
@@ -314,8 +386,56 @@ class LateralAutoPilot:
         roll_ff = 0
         yaw_cmd = 0
         # STUDENT CODE HERE
-        
-        
+        if (self.gate == 1):
+            if(local_position[0] > 500):
+                self.gate = self.gate + 1
+                print('Gate 1 Complete')
+                print('Yaw Int = ', self.integrator_yaw)
+                self.integrator_yaw = 0.0
+            else:
+                roll_ff = 0.0
+                line_origin = np.array([0.0, 20.0, -450.0])
+                line_course = 0.0
+                yaw_cmd = self.straight_line_guidance(line_origin, line_course, local_position)
+        if (self.gate == 2):
+            if(local_position[1] < -380):
+                self.gate = self.gate + 1
+                print('Gate 2 Complete')
+                print('Yaw Int = ', self.integrator_yaw)
+                self.integrator_yaw = 0.0
+            else:
+                radius = 400
+                cw = False
+                orbit_center = np.array([500.0, -380.0, -450.0])
+                roll_ff = self.coordinated_turn_ff(airspeed_cmd, radius, cw)
+                yaw_cmd = self.orbit_guidance(orbit_center, radius, local_position, yaw, cw)
+        if(self.gate == 3):
+            if(local_position[0] < 600):
+                self.gate = self.gate + 1
+                print('Gate 3 Complete')
+                print('Yaw Int = ', self.integrator_yaw)
+                self.integrator_yaw = 0.0
+            else:
+                radius = 300
+                cw = False
+                orbit_center = np.array([600.0, -380.0, -450.0])
+                roll_ff = self.coordinated_turn_ff(airspeed_cmd, radius, cw)
+                yaw_cmd = self.orbit_guidance(orbit_center, radius, local_position, cw)
+        if(self.gate == 4):
+            if(local_position[0] < -500):
+                print('Lateral Challenge Finished')
+                print('Yaw Int = ', self.integrator_yaw)
+                self.integrator_yaw = 0.0
+            else:
+                roll_ff = 0.0
+                line_origin = np.array([600.0, -680.0, -450.0])
+                line_course = np.pi
+                yaw_cmd = self.straight_line_guidance(line_origin, line_course, local_position)
+        if(self.gate > 4):
+            roll_ff = 0.0
+            yaw_cmd = 0.0
+            print('Invalid gate')
+
         return(roll_ff,yaw_cmd)
     
     
@@ -340,8 +460,40 @@ class LateralAutoPilot:
         cycle = False
         
         # STUDENT CODE HERE
-        
-        
+        radius = 500
+
+        prev_waypoint = waypoint_tuple[0][0:2]
+        curr_waypoint = waypoint_tuple[1][0:2]
+        next_waypoint = waypoint_tuple[2][0:2]
+        q0 = (curr_waypoint - prev_waypoint)/np.linalg.norm(curr_waypoint - prev_waypoint)
+        q1 = (next_waypoint - curr_waypoint)/np.linalg.norm(next_waypoint - curr_waypoint)
+        angle = np.arccos(-np.dot(q0, q1))
+
+        if self.state == 1:
+            q = q0
+            z = curr_waypoint - (radius/np.tan(angle/2))*q0
+            course = np.arctan2(q[1], q[0])
+            if np.dot(local_position - z, q) > 0:
+                self.state = 2
+                self.integrator_yaw = 0
+            else:
+                roll_ff = 0
+                line_origin = prev_waypoint
+                line_course = course
+                yaw_cmd = self.straight_line_guidance(line_origin, line_course, local_position)
+        elif self.state == 2:
+            c = curr_waypoint - (radius/np.sin(angle/2))*(q0-q1)/np.linalg.norm(q0-q1)
+            z = curr_waypoint + (radius/np.tan(angle/2))*q1
+            cw = np.sign(q0[0]*q1[1] - q0[1]*q1[0])
+            if np.dot(local_position - z, q1) > 0:
+                print('Center: ', c)
+                print('Transtion: ', z)
+                self.state = 1
+                self.integrator_yaw = 0
+                cycle = True
+            else:
+                yaw_cmd = self.orbit_guidance(c, radius, local_position, yaw, cw>0)
+                roll_ff = self.coordinated_turn_ff(airspeed_cmd, radius, cw>0)
         
         return(roll_ff, yaw_cmd, cycle)
 
